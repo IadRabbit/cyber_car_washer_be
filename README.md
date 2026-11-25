@@ -1,78 +1,71 @@
 # cyber-car-washer-be
 
-Backend serverless che, dato l'UID di una card, genera in modo deterministico le 16 coppie di chiavi (Key A / Key B, 6 byte ciascuna) dei settori della card.
+Serverless backend that, given a card UID, deterministically generates the 16 key pairs (Key A / Key B, 6 bytes each) for the card's sectors.
 
-> **Progetto CTF — RomHack Camp 2026**
+> **CTF project — RomHack Camp 2026**
 >
-> Questa repository fa parte della challenge **Cyber Car Washer**, una CTF portata al **RomHack Camp 2026**. La challenge simula il sistema di fidelity card di un autolavaggio "cyber" ed è interamente basata su **MIFARE Classic 1K**: il saldo, l'anagrafica del cliente e la data di creazione vivono sulla card, protetti da chiavi diverse per ogni settore derivate lato backend.
+> This repository is part of **Cyber Car Washer**, a CTF challenge brought to **RomHack Camp 2026**. The challenge simulates the loyalty card system of a "cyber" car wash and is entirely based on **MIFARE Classic 1K**: the balance, the customer's personal data and the creation date live on the card, protected by per-sector keys derived on the backend.
 >
-> Il progetto è composto da tre repository:
+> The project is made of three repositories:
 >
-> | Repository | Ruolo |
+> | Repository | Role |
 > |---|---|
-> | [`cyber_car_washer_be`](https://github.com/IadRabbit/cyber_car_washer_be) | Backend serverless (AWS) che deriva le chiavi dei settori a partire dal blocco 0 della card |
-> | [`CyberCarWasherAdmin`](https://github.com/IadRabbit/CyberCarWasherAdmin) | App Android dell'operatore: emissione card, ricarica, POS, formattazione |
-> | [`CyberCarWasher`](https://github.com/IadRabbit/CyberCarWasher) | App Android del cliente: consultazione della card e catalogo servizi |
+> | [`cyber_car_washer_be`](https://github.com/IadRabbit/cyber_car_washer_be) | Serverless backend (AWS) that derives the sector keys from the card's block 0 |
+> | [`CyberCarWasherAdmin`](https://github.com/IadRabbit/CyberCarWasherAdmin) | Operator Android app: card issuing, top-up, POS, formatting |
+> | [`CyberCarWasher`](https://github.com/IadRabbit/CyberCarWasher) | Customer Android app: card details and service catalog |
 
-## Infrastruttura
+## Infrastructure
 
-Il componente evidenziato con ★ è quello contenuto in questa repository.
+The component marked with ★ is the one contained in this repository.
 
 ```
-┌─ AWS — VPC, 2 subnet pubbliche (Terraform) ─────────────────────────────────────┐
+┌─ AWS — VPC, 2 public subnets (Terraform) ───────────────────────────────────────┐
 │  ┌──────────────────────────────────┐     ┌──────────────────────────────────┐  │
 │  │ Application Load Balancer        │     │ ★ AWS Lambda (Python 3.13)       │  │
 │  │ HTTPS :443, cert self-signed     │ ──▶ │ cyber_car_washer_be              │  │
-│  │ X-Api-Key valida → forward       │     │ UID → 16 × (Key A, Key B)        │  │
-│  │ altrimenti → 404                 │     │ PRNG deterministico              │  │
+│  │ valid X-Api-Key → forward        │     │ UID → 16 × (Key A, Key B)        │  │
+│  │ otherwise → 404                  │     │ deterministic PRNG               │  │
 │  └──────────────────────────────────┘     └──────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────────────────────┘
                      ▲
-                     │  POST {"uid": <blocco 0 hex>}  →  {"keys": [...]}
+                     │  POST {"uid": <block 0 hex>}  →  {"keys": [...]}
                      │  header X-Api-Key + certificate pinning
                 ┌────┴──────────────────────────────────┐
 ┌───────────────┴──────────────┐        ┌───────────────┴──────────────┐
 │ CyberCarWasherAdmin          │        │ CyberCarWasher               │
-│ app Android operatore        │        │ app Android cliente          │
-│ emissione, ricarica, POS,    │        │ dati card, saldo,            │
-│ formattazione, raw edit      │        │ catalogo servizi             │
+│ operator Android app         │        │ customer Android app         │
+│ issuing, top-up, POS,        │        │ card data, balance,          │
+│ formatting, raw edit         │        │ service catalog              │
 └───────────────┬──────────────┘        └───────────────┬──────────────┘
                 │ NFC                                   │ NFC
                 └───────────────────┬───────────────────┘
                                     ▼
-                  ┌──────────────────────────────────┐
-                  │ MIFARE Classic 1K                │
-                  │                                  │
-                  │ sett. 0    blocco 0 (UID)        │
-                  │ sett. 1-11 dati statici          │
-                  │ sett. 12   saldo (value block)   │
-                  │ sett. 13   data creazione        │
-                  │ sett. 14   cognome               │
-                  │ sett. 15   nome                  │
-                  │ chiavi A/B diverse per settore   │
-                  └──────────────────────────────────┘
+                 ┌────────────────────────────────────┐
+                 │ MIFARE Classic 1K                  │
+                 │                                    │
+                 │ sector 0     block 0 (UID)         │
+                 │ sectors 1-11 static data           │
+                 │ sector 12    balance (value block) │
+                 │ sector 13    creation date         │
+                 │ sector 14    surname               │
+                 │ sector 15    name                  │
+                 │ per-sector A/B keys                │
+                 └────────────────────────────────────┘
 ```
 
-Il servizio è una AWS Lambda in Python esposta tramite un Application Load Balancer in HTTPS; l'infrastruttura è descritta con Terraform.
+The service is a Python AWS Lambda exposed through an HTTPS Application Load Balancer; the infrastructure is described with Terraform.
 
-## Come funziona
+## How it works
 
-1. Il client invia una `POST` all'ALB con l'header `X-Api-Key` e un body JSON contenente l'UID in esadecimale.
-2. L'ALB inoltra la richiesta alla Lambda solo se `X-Api-Key` corrisponde al valore configurato; in tutti gli altri casi risponde `404 Not Found`.
-3. La Lambda valida il payload, inizializza il PRNG con `uid XOR DEFAULT_ACCESS_KEYS_KEY` e genera 16 coppie di chiavi da 6 byte.
+1. The client sends a `POST` to the ALB with the `X-Api-Key` header and a JSON body containing the UID in hex.
+2. The ALB forwards the request to the Lambda only if `X-Api-Key` matches the configured value; in every other case it responds `404 Not Found`.
+3. The Lambda validates the payload, seeds the PRNG with `uid XOR DEFAULT_ACCESS_KEYS_KEY` and generates 16 pairs of 6-byte keys.
 
-A parità di UID le chiavi restituite sono sempre le stesse.
-
-```
-client ──HTTPS──▶ ALB (:443, cert self-signed)
-                   │  regola: X-Api-Key == var.api_key
-                   ▼
-                 Lambda (cyber_car_washer_be.handler.lambda_handler)
-```
+The same UID always returns the same keys.
 
 ## API
 
-### Richiesta
+### Request
 
 ```http
 POST / HTTP/1.1
@@ -80,14 +73,14 @@ Host: <alb_dns_name>
 Content-Type: application/json
 X-Api-Key: <api_key>
 
-{"uid": "<32 caratteri esadecimali>"}
+{"uid": "<32 hex characters>"}
 ```
 
-| Campo | Tipo   | Descrizione                                     |
-|-------|--------|-------------------------------------------------|
-| `uid` | string | UID della card in esadecimale, lunghezza 32 caratteri |
+| Field | Type   | Description                                 |
+|-------|--------|---------------------------------------------|
+| `uid` | string | Card UID in hex, 32 characters long         |
 
-### Risposta `200`
+### `200` response
 
 ```json
 {
@@ -98,17 +91,17 @@ X-Api-Key: <api_key>
 }
 ```
 
-`keys` contiene 16 elementi, uno per settore; `key_a` e `key_b` sono interi.
+`keys` contains 16 items, one per sector; `key_a` and `key_b` are integers.
 
-### Risposta `400`
+### `400` response
 
-Restituita quando il body non è un JSON valido o l'UID non rispetta il formato:
+Returned when the body is not valid JSON or the UID does not match the expected format:
 
 ```json
 { "error": "invalid_request", "details": [ ... ] }
 ```
 
-### Esempio con curl
+### curl example
 
 ```bash
 curl -k -X POST "https://$(terraform -chdir=terraform output -raw alb_dns_name)/" \
@@ -117,39 +110,39 @@ curl -k -X POST "https://$(terraform -chdir=terraform output -raw alb_dns_name)/
   -d '{"uid": "00112233445566778899aabbccddeeff"}'
 ```
 
-`-k` è necessario perché il certificato dell'ALB è self-signed (vedi [Note](#note)).
+`-k` is required because the ALB certificate is self-signed (see [Notes](#notes)).
 
-## Struttura del progetto
+## Project structure
 
 ```
 .
 ├── src/cyber_car_washer_be/
-│   ├── handler.py       # entrypoint della Lambda e generazione delle chiavi
-│   ├── models.py        # modelli Pydantic di richiesta e risposta
-│   └── responses.py     # helper per le risposte nel formato ALB
+│   ├── handler.py       # Lambda entrypoint and key generation
+│   ├── models.py        # Pydantic request/response models
+│   └── responses.py     # helpers for ALB-formatted responses
 ├── terraform/
-│   ├── vpc.tf           # VPC, subnet pubbliche, internet gateway
+│   ├── vpc.tf           # VPC, public subnets, internet gateway
 │   ├── security_groups.tf
-│   ├── acm.tf           # certificato self-signed importato in ACM
-│   ├── alb.tf           # ALB, listener HTTPS, regola su X-Api-Key
-│   ├── lambda.tf        # funzione Lambda, ruolo IAM, permesso di invocazione
-│   ├── lambda_build.tf  # build del pacchetto in container Docker
-│   ├── build_lambda.sh  # script di packaging (uv + zip)
+│   ├── acm.tf           # self-signed certificate imported into ACM
+│   ├── alb.tf           # ALB, HTTPS listener, X-Api-Key rule
+│   ├── lambda.tf        # Lambda function, IAM role, invoke permission
+│   ├── lambda_build.tf  # package build in a Docker container
+│   ├── build_lambda.sh  # packaging script (uv + zip)
 │   ├── variables.tf
 │   └── outputs.tf
 ├── pyproject.toml
 └── uv.lock
 ```
 
-## Sviluppo locale
+## Local development
 
-Requisiti: Python 3.13+ e [uv](https://docs.astral.sh/uv/).
+Requirements: Python 3.13+ and [uv](https://docs.astral.sh/uv/).
 
 ```bash
 uv sync
 ```
 
-Per invocare l'handler in locale con un evento ALB di esempio:
+To invoke the handler locally with a sample ALB event:
 
 ```bash
 uv run python -m cyber_car_washer_be.handler
@@ -157,57 +150,57 @@ uv run python -m cyber_car_washer_be.handler
 
 ## Deploy
 
-Requisiti:
+Requirements:
 
 - Terraform >= 1.5
-- Docker (la build del pacchetto avviene nell'immagine `public.ecr.aws/sam/build-python<versione>`, così le wheel compilate come `pydantic-core` corrispondono al runtime Lambda)
-- Credenziali AWS configurate
+- Docker (the package is built in the `public.ecr.aws/sam/build-python<version>` image, so compiled wheels such as `pydantic-core` match the Lambda runtime)
+- Configured AWS credentials
 
 ```bash
 cd terraform
 terraform init
-terraform apply -var="api_key=<segreto>"
+terraform apply -var="api_key=<secret>"
 ```
 
-Terraform ricostruisce automaticamente `terraform/build/lambda.zip` quando cambiano i sorgenti, `pyproject.toml`, `uv.lock`, lo script di build, l'architettura o la versione di Python.
+Terraform automatically rebuilds `terraform/build/lambda.zip` when the sources, `pyproject.toml`, `uv.lock`, the build script, the architecture or the Python version change.
 
-### Variabili
+### Variables
 
-| Variabile               | Default              | Descrizione                                      |
+| Variable                | Default              | Description                                      |
 |-------------------------|----------------------|--------------------------------------------------|
-| `api_key`               | — (obbligatoria)     | Valore richiesto nell'header `X-Api-Key`         |
-| `aws_region`            | `eu-west-1`          | Regione AWS                                      |
-| `project_name`          | `cyber-car-washer`   | Prefisso dei nomi delle risorse                  |
-| `vpc_cidr`              | `10.0.0.0/16`        | CIDR della VPC                                   |
-| `public_subnet_cidrs`   | `["10.0.1.0/24", "10.0.2.0/24"]` | Subnet pubbliche, una per AZ         |
-| `lambda_architecture`   | `arm64`              | `arm64` oppure `x86_64`                          |
-| `lambda_python_version` | `3.13`               | Versione del runtime Python della Lambda         |
-| `lambda_memory_size`    | `128`                | Memoria della Lambda (MB)                        |
-| `lambda_timeout`        | `10`                 | Timeout della Lambda (secondi)                   |
+| `api_key`               | — (required)         | Value required in the `X-Api-Key` header         |
+| `aws_region`            | `eu-west-1`          | AWS region                                       |
+| `project_name`          | `cyber-car-washer`   | Resource name prefix                             |
+| `vpc_cidr`              | `10.0.0.0/16`        | VPC CIDR                                         |
+| `public_subnet_cidrs`   | `["10.0.1.0/24", "10.0.2.0/24"]` | Public subnets, one per AZ           |
+| `lambda_architecture`   | `arm64`              | `arm64` or `x86_64`                              |
+| `lambda_python_version` | `3.13`               | Lambda Python runtime version                    |
+| `lambda_memory_size`    | `128`                | Lambda memory (MB)                               |
+| `lambda_timeout`        | `10`                 | Lambda timeout (seconds)                         |
 
-I file `*.tfvars` sono esclusi da git: è possibile salvare lì `api_key` invece di passarla da riga di comando.
+`*.tfvars` files are excluded from git: you can store `api_key` there instead of passing it on the command line.
 
-### Output
+### Outputs
 
-| Output                 | Descrizione                         |
+| Output                 | Description                         |
 |------------------------|-------------------------------------|
-| `alb_dns_name`         | DNS pubblico dell'ALB               |
-| `lambda_function_name` | Nome della funzione Lambda          |
+| `alb_dns_name`         | Public DNS name of the ALB          |
+| `lambda_function_name` | Lambda function name                |
 
-## Note
+## Notes
 
-- **Certificato TLS**: l'ALB è raggiungibile solo tramite il DNS generato da AWS, quindi ACM non può emettere un certificato pubblico. Terraform genera un certificato self-signed (validità 1 anno) e lo importa in ACM; i client devono disabilitare la verifica TLS.
-- **Health check** del target group disabilitati: una richiesta sintetica fallirebbe la validazione (400) e marcherebbe la Lambda come unhealthy.
-- **Autenticazione**: l'unica protezione è la shared secret in `X-Api-Key`, verificata a livello di ALB.
+- **TLS certificate**: the ALB is only reachable through the AWS-generated DNS name, so ACM cannot issue a public certificate. Terraform generates a self-signed certificate (valid for 1 year) and imports it into ACM; clients must disable TLS verification (the Android apps pin the exact certificate instead).
+- Target group **health checks** are disabled: a synthetic request would fail validation (400) and mark the Lambda as unhealthy.
+- **Authentication**: the only protection is the shared secret in `X-Api-Key`, checked at the ALB level.
 
-## Nota sullo sviluppo
+## Development note
 
-Nel progetto, solo la **parte visiva** delle app Android (layout, animazioni, stile delle schermate) è stata *vibecodata* con l'aiuto di strumenti di AI. Questa repository non contiene parti visive.
+Across the project, only the **visual part** of the Android apps (layouts, animations, screen styling) was *vibe-coded* with the help of AI tools. This repository contains no visual part.
 
-**Non** lo sono stati invece:
+The following parts were **not**:
 
-- la **progettazione** della challenge e del layout dei dati sulla card;
-- la **logica core** (gestione dei settori MIFARE, autenticazione, value block, operazioni di incremento/decremento, derivazione delle chiavi);
-- la **validazione** dell'input e dei dati letti dalla card;
-- il **controllo di integrità** (verifica del formato dei value block e degli access bits prima di ogni operazione sul saldo);
-- l'**infrastruttura** (AWS, Terraform, ALB, Lambda, certificate pinning).
+- the **design** of the challenge and of the data layout on the card;
+- the **core logic** (MIFARE sector handling, authentication, value blocks, increment/decrement operations, key derivation);
+- **validation** of user input and of data read from the card;
+- the **integrity checks** (value block format and access bits verification before every balance operation);
+- the **infrastructure** (AWS, Terraform, ALB, Lambda, certificate pinning).
